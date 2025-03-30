@@ -75,7 +75,7 @@ namespace DiscordRichPresence {
         ReadPipeFailed,
         WritePipeFailed,
         HandshakeFailed,
-        UpdateActivityFailed
+        SetActivityFailed
     };
 
     struct IpcMessage {
@@ -92,8 +92,12 @@ namespace DiscordRichPresence {
     };
 
     #ifdef _WIN32
-    class WindowsPipe : public Pipe {
+    class WindowsPipe final : public Pipe {
     public:
+        ~WindowsPipe() {
+            Close();
+        }
+        
         Result Open() override {
             if (pipe_handle) return Result::Ok;
 
@@ -125,10 +129,6 @@ namespace DiscordRichPresence {
             if (!pipe_handle) return Result::PipeNotOpen;
             CloseHandle(pipe_handle);
             return Result::Ok;
-        }
-
-        ~WindowsPipe() {
-            Close();
         }
 
         template<size_t N>
@@ -478,7 +478,32 @@ namespace DiscordRichPresence {
             if (result = pipe->Read(&message); result != Result::Ok) return result;
             return message.op_code == 1
                 && message.message.find("\"evt\":\"ERROR\"") == std::string::npos
-                ? Result::Ok : Result::UpdateActivityFailed;
+                ? Result::Ok : Result::SetActivityFailed;
+        }
+
+        Result ClearActivity() {
+            #if _WIN32
+            int pid = GetCurrentProcessId();
+            #else // unix
+            #include <unistd.h>
+            int pid = getpid();
+            #endif
+
+            std::string msg = std::format(
+                "{{\"cmd\":\"SET_ACTIVITY\",\"args\":{{\"pid\":{},\"activity\":{{}}}},\"nonce\":\"{}\"}}",
+                pid,
+                UUID::GenerateUUIDv4()
+            );
+
+            Result result;
+            if (result = pipe->Write(1, msg); result != Result::Ok) return result;
+
+            // Wait for response
+            IpcMessage message;
+            if (result = pipe->Read(&message); result != Result::Ok) return result;
+            return message.op_code == 1
+                && message.message.find("\"evt\":\"ERROR\"") == std::string::npos
+                ? Result::Ok : Result::SetActivityFailed;
         }
     private:
         std::shared_ptr<Pipe> pipe;
