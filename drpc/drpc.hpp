@@ -455,6 +455,15 @@ namespace DiscordRichPresence {
             return message.op_code == 1 ? Result::Ok : Result::HandshakeFailed;
         }
 
+        Result Disconnect() {
+            return pipe->Close();
+        }
+
+        Result Reconnect() {
+            if (Result result = pipe->Close(); result != Result::Ok) return result;
+            return Connect();
+        }
+
         Result UpdateActivity(const Activity& activity) {
             #if _WIN32
             int pid = GetCurrentProcessId();
