@@ -28,6 +28,10 @@ int main() {
     activity.SetParty(party);
     activity.SetState("Party"); // State moves to the party field if party is not null
 
+    // Buttons
+    activity.AddButton(DiscordRichPresence::Button("Test", "https://yooksch.com"));
+    activity.AddButton(DiscordRichPresence::Button("Test 2", "https://youtu.be/dQw4w9WgXcQ"));
+
     auto result = client.UpdateActivity(activity);
     if (result == DiscordRichPresence::Result::Ok) {
         std::cout << "Successfully set activity!" << std::endl;

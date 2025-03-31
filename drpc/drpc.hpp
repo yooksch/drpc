@@ -31,6 +31,7 @@ DEALINGS IN THE SOFTWARE.
 #include <format>
 #include <memory>
 #include <optional>
+#include <print>
 #include <random>
 #include <vector>
 #include <string>
@@ -312,6 +313,37 @@ namespace DiscordRichPresence {
         std::string small_text;
     };
 
+    class Button {
+    public:
+        Button(std::string label, std::string url) {
+            SetLabel(label);
+            SetUrl(url);
+        }
+
+        void SetLabel(std::string label) {
+            assert(label.length() < 32);
+            this->label = label;
+        }
+        std::string GetLabel() const {
+            return label;
+        }
+
+        void SetUrl(std::string url) {
+            assert(url.length() < 512);
+            this->url = url;
+        }
+        std::string GetUrl() const {
+            return url;
+        }
+
+        std::string ToJson() const {
+            return std::format("{{\"label\":\"{}\",\"url\":\"{}\"}}", label, url);
+        }
+    private:
+        std::string label;
+        std::string url;
+    };
+
     enum class ActivityType {
         Playing = 0,
         Listening = 2,
@@ -383,6 +415,15 @@ namespace DiscordRichPresence {
             return assets;
         }
 
+        void AddButton(Button button) {
+            assert(buttons.size() < 2);
+            buttons.emplace_back(button);
+        }
+
+        void ClearButtons() {
+            buttons.clear();
+        }
+
         std::string ToJson() const {
             std::string result = "{";
 
@@ -413,6 +454,16 @@ namespace DiscordRichPresence {
             // assets
             result += std::format("\"assets\":{},", assets.ToJson());
 
+            // buttons
+            if (buttons.size() > 0) {
+                result += "\"buttons\":[";
+                for (const auto& btn : buttons)
+                    result += btn.ToJson() + ",";
+
+                result.erase(result.length() - 1); // remove trailing comma
+                result += "],";
+            }
+
             // remove trailing comma
             if (result.ends_with(","))
                 result.erase(result.length() - 1);
@@ -427,6 +478,7 @@ namespace DiscordRichPresence {
         Timestamps timestamps;
         std::optional<Party> party = std::nullopt;
         Assets assets;
+        std::vector<Button> buttons;
     };
 
     #pragma endregion
