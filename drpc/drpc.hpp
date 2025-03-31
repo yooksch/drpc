@@ -71,7 +71,6 @@ namespace DiscordRichPresence {
     enum class Result {
         Ok = 0,
         OpenPipeFailed,
-        PipeNotOpen,
         ReadPipeFailed,
         WritePipeFailed,
         HandshakeFailed,
@@ -126,7 +125,6 @@ namespace DiscordRichPresence {
         }
 
         Result Close() override {
-            if (!pipe_handle) return Result::PipeNotOpen;
             CloseHandle(pipe_handle);
             pipe_handle = NULL;
             return Result::Ok;
