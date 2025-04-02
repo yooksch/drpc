@@ -29,9 +29,11 @@ DEALINGS IN THE SOFTWARE.
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <map>
 #include <memory>
-#include <optional>
 #include <random>
+#include <sstream>
+#include <variant>
 #include <vector>
 #include <string>
 #include <array>
@@ -41,6 +43,157 @@ DEALINGS IN THE SOFTWARE.
 #endif
 
 namespace DiscordRichPresence {
+    namespace JSON {
+        class JsonWriter;
+
+        class JsonSerializable {
+        public:
+            virtual ~JsonSerializable() = default;
+            virtual void ToJson(JsonWriter* writer) const = 0;
+        };
+
+        class JsonValue {
+        public:
+            JsonValue(const std::string& string) : value(string) {}
+            JsonValue(const char* string) : value(string) {}
+            JsonValue(int32_t n) : value(n) {}
+            JsonValue(uint32_t n) : value(n) {}
+            JsonValue(int64_t n) : value(n) {}
+            JsonValue(uint64_t n) : value(n) {}
+            JsonValue(float n) : value(n) {}
+            JsonValue(double n) : value(n) {}
+            JsonValue(bool b) : value(b) {}
+            JsonValue(std::shared_ptr<JsonSerializable> serializable) : value(serializable) {}
+            JsonValue(std::vector<JsonValue> vec) : value(vec) {}
+            JsonValue(std::map<std::string, JsonValue> map) : value(map) {}
+
+            template<typename T>
+            T get() const {
+                return std::get<T>(value);
+            }
+
+            void ToJson(JsonWriter* writer) const;
+        private:
+            std::variant<
+                std::string,
+                int32_t,
+                uint32_t,
+                int64_t,
+                uint64_t,
+                float,
+                double,
+                bool,
+                std::vector<JsonValue>,
+                std::map<std::string, JsonValue>,
+                std::shared_ptr<JsonSerializable>
+                > value;
+        };
+
+        template<typename T>
+        concept JsonValueType = requires(T value) {
+            JsonValue(value);
+        };
+
+        class JsonWriter {
+        public:
+        void BeginObject() {
+                WriteRaw("{");
+                current_object_sizes.emplace_back(0);
+            }
+
+            void EndObject() {
+                WriteRaw("}");
+                current_object_sizes.pop_back();
+            }
+
+            std::string ToString() const {
+                return s.str();
+            }
+
+            void Write(const JsonSerializable& object) {
+                object.ToJson(this);
+            }
+
+            void Write(const JsonValue value) {
+                value.ToJson(this);
+            }
+            
+            void WriteRaw(const char* str) {
+                s.write(str, strlen(str));
+            }
+
+            void PendMember(const char* key) {
+                assert(current_object_sizes.size() > 0);
+
+                if (current_object_sizes.back() > 0)
+                    WriteRaw(",");
+
+                Write(key);
+                WriteRaw(":");
+                current_object_sizes.back()++;
+            }
+
+            template<JsonValueType T>
+            void Put(const std::string& key, T value) {
+                assert(current_object_sizes.size() > 0);
+
+                if (current_object_sizes.back() > 0)
+                    WriteRaw(",");
+
+                Write(key);
+                WriteRaw(":");
+                Write(JsonValue(value));
+                current_object_sizes.back()++;
+            }
+        private:
+            std::stringstream s;
+            std::vector<size_t> current_object_sizes;
+        };
+
+        inline void JsonValue::ToJson(JsonWriter* writer) const {
+            if (std::holds_alternative<std::string>(value)) {
+                writer->WriteRaw("\"");
+                writer->WriteRaw(std::get<std::string>(value).c_str());
+                writer->WriteRaw("\"");
+            } else if (std::holds_alternative<int32_t>(value)) {
+                writer->WriteRaw(std::to_string(std::get<int32_t>(value)).c_str());
+            } else if (std::holds_alternative<uint32_t>(value)) {
+                writer->WriteRaw(std::to_string(std::get<uint32_t>(value)).c_str());
+            } else if (std::holds_alternative<int64_t>(value)) {
+                writer->WriteRaw(std::to_string(std::get<int64_t>(value)).c_str());
+            } else if (std::holds_alternative<uint64_t>(value)) {
+                writer->WriteRaw(std::to_string(std::get<uint64_t>(value)).c_str());
+            } else if (std::holds_alternative<float>(value)) {
+                writer->WriteRaw(std::to_string(std::get<float>(value)).c_str());
+            } else if (std::holds_alternative<double>(value)) {
+                writer->WriteRaw(std::to_string(std::get<double>(value)).c_str());
+            } else if (std::holds_alternative<bool>(value)) {
+                writer->WriteRaw(std::get<bool>(value) ? "true" : "false");
+            } else if (std::holds_alternative<std::shared_ptr<JsonSerializable>>(value)){
+                auto s = std::get<std::shared_ptr<JsonSerializable>>(value);
+                s->ToJson(writer);
+            } else if (std::holds_alternative<std::vector<JsonValue>>(value)) {
+                writer->WriteRaw("[");
+
+                auto items = std::get<std::vector<JsonValue>>(value);
+                for (size_t i = 0; i < items.size(); i++) {
+                    items[i].ToJson(writer);
+                    if (i + 1 < items.size())
+                        writer->WriteRaw(",");
+                }
+
+                writer->WriteRaw("]");
+            } else if (std::holds_alternative<std::map<std::string, JsonValue>>(value)) {
+                writer->WriteRaw("{");
+
+                for (auto const& [key, value] : std::get<std::map<std::string, JsonValue>>(value))
+                    writer->Put(key, value);
+
+                writer->WriteRaw("}");
+            }
+        }
+    }
+
     namespace UUID {
         inline std::string GenerateUUIDv4() {
             static std::random_device rd;
@@ -184,32 +337,25 @@ namespace DiscordRichPresence {
 
     #pragma region Activity Types
 
-    class Timestamps {
+    class Timestamps : public JSON::JsonSerializable {
     public:
         void SetStart(int64_t seconds) { start = seconds; }
         void SetEnd(int64_t seconds) { end = seconds; }
         int64_t GetStart() const { return start; }
         int64_t GetEnd() const { return end; }
 
-        std::string TsJson() const {
-            std::string result = "{";
-
-            if (start != 0)
-                result += std::format("\"start\":{},", start);
-
-            if (end != 0)
-                result += std::format("\"end\":{}", end);
-
-            if (result.ends_with(","))
-                result.erase(result.length() - 1);
-            return result + "}";
+        void ToJson(JSON::JsonWriter* writer) const override {
+            writer->BeginObject();
+            if (start > 0) writer->Put("start", start);
+            if (end > 0) writer->Put("end", end);
+            writer->EndObject();
         }
     private:
         int64_t start = 0;
         int64_t end = 0;
     };
 
-    class Party {
+    class Party : public JSON::JsonSerializable {
     public:
         void SetId(std::string id) {
             this->id = id;
@@ -240,18 +386,16 @@ namespace DiscordRichPresence {
             return max_size;
         }
 
-        std::string ToJson() const {
-            std::string result = "{";
+        void ToJson(JSON::JsonWriter* writer) const override {
+            writer->BeginObject();
 
             if (id.length() > 0)
-                result += std::format("\"id\":\"{}\",", id);
+                writer->Put("id", id);
 
             if (current_size != 0 || max_size != 0)
-                result += std::format("\"size\":[{}, {}],", current_size, max_size);
+                writer->Put("size", std::vector {JSON::JsonValue(current_size), JSON::JsonValue(max_size)});
 
-            if (result.ends_with(","))
-                result.erase(result.length() - 1);
-            return result + "}";
+            writer->EndObject();
         }
     private:
         std::string id;
@@ -259,7 +403,7 @@ namespace DiscordRichPresence {
         int max_size = 0;
     };
 
-    class Assets {
+    class Assets : public JSON::JsonSerializable {
     public:
         void SetLargeImage(std::string image) {
             large_image = image;
@@ -289,21 +433,13 @@ namespace DiscordRichPresence {
             return small_text;
         }
 
-        std::string ToJson() const {
-            std::string result = "{";
-
-            if (large_image.length() > 0)
-                result += std::format("\"large_image\":\"{}\",", large_image);
-            if (large_text.length() > 0)
-                result += std::format("\"large_text\":\"{}\",", large_text);
-            if (small_image.length() > 0)
-                result += std::format("\"small_image\":\"{}\",", small_image);
-            if (small_text.length() > 0)
-                result += std::format("\"small_text\":\"{}\",", small_text);
-
-            if (result.ends_with(","))
-                result.erase(result.length() - 1);
-            return result + "}";
+        void ToJson(JSON::JsonWriter* writer) const override {
+            writer->BeginObject();
+            writer->Put("large_image", large_image);
+            writer->Put("large_text", large_text);
+            writer->Put("small_image", small_image);
+            writer->Put("small_text", small_text);
+            writer->EndObject();
         }
     private:
         std::string large_image;
@@ -312,7 +448,7 @@ namespace DiscordRichPresence {
         std::string small_text;
     };
 
-    class Button {
+    class Button : public JSON::JsonSerializable {
     public:
         Button(std::string label, std::string url) {
             SetLabel(label);
@@ -335,8 +471,11 @@ namespace DiscordRichPresence {
             return url;
         }
 
-        std::string ToJson() const {
-            return std::format("{{\"label\":\"{}\",\"url\":\"{}\"}}", label, url);
+        void ToJson(JSON::JsonWriter* writer) const override {
+            writer->BeginObject();
+            writer->Put("label", label);
+            writer->Put("url", url);
+            writer->EndObject();
         }
     private:
         std::string label;
@@ -350,7 +489,7 @@ namespace DiscordRichPresence {
         Competing = 5
     };
 
-    class Activity {
+    class Activity : public JSON::JsonSerializable {
     public:
         /**
          * @brief Set the client/application id
@@ -396,25 +535,25 @@ namespace DiscordRichPresence {
             return state;
         }
 
-        Timestamps& GetTimestamps() {
+        std::shared_ptr<Timestamps> GetTimestamps() {
             return timestamps;
         }
 
-        void SetParty(std::optional<Party> party) {
+        void SetParty(std::shared_ptr<Party> party) {
             this->party = party;
         }
         /**
          * Note: Party is std::nullopt by default
          */
-        Party* GetParty() {
-            return party.has_value() ? &party.value() : nullptr;
+        std::shared_ptr<Party> GetParty() {
+            return party != nullptr ? party : nullptr;
         }
 
-        Assets& GetAssets() {
+        std::shared_ptr<Assets> GetAssets() {
             return assets;
         }
 
-        void AddButton(Button button) {
+        void AddButton(std::shared_ptr<Button> button) {
             assert(buttons.size() < 2);
             buttons.emplace_back(button);
         }
@@ -423,50 +562,37 @@ namespace DiscordRichPresence {
             buttons.clear();
         }
 
-        std::string ToJson() const {
-            std::string result = "{";
+        void ToJson(JSON::JsonWriter* writer) const override {
+            writer->BeginObject();
 
             if (name.length() > 0)
-                result += std::format("\"name\":\"{}\",", name);
+                writer->Put("name", name);
 
             if (client_id != 0)
-                result += std::format("\"client_id\":\"{}\",", client_id);
+                writer->Put("client_id", client_id);
 
-            // activity type
-            result += std::format("\"type\":{},", static_cast<int>(type));
+            writer->Put("type", static_cast<int>(type));
 
-            // details
             if (details.length() > 0)
-                result += std::format("\"details\":\"{}\",", details);
+                writer->Put("details", details);
 
-            // state
             if (state.length() > 0)
-                result += std::format("\"state\":\"{}\",", state);
+                writer->Put("state", state);
 
-            // timestamps
-            result += std::format("\"timestamps\":{},", timestamps.TsJson());
+            writer->Put("timestamps", timestamps);
+            
+            if (party != nullptr)
+                writer->Put("party", party);
 
-            // party
-            if (party.has_value())
-                result += std::format("\"party\":{},", party.value().ToJson());
+            writer->Put("assets", assets);
+            
+            std::vector<JSON::JsonValue> j_buttons;
+            for (const auto& btn : buttons)
+                j_buttons.emplace_back(btn);
 
-            // assets
-            result += std::format("\"assets\":{},", assets.ToJson());
+            writer->Put("buttons", j_buttons);
 
-            // buttons
-            if (buttons.size() > 0) {
-                result += "\"buttons\":[";
-                for (const auto& btn : buttons)
-                    result += btn.ToJson() + ",";
-
-                result.erase(result.length() - 1); // remove trailing comma
-                result += "],";
-            }
-
-            // remove trailing comma
-            if (result.ends_with(","))
-                result.erase(result.length() - 1);
-            return result + "}";
+            writer->EndObject();
         }
     private:
         uint64_t client_id = 0;
@@ -474,10 +600,10 @@ namespace DiscordRichPresence {
         ActivityType type = ActivityType::Playing;
         std::string details;
         std::string state;
-        Timestamps timestamps;
-        std::optional<Party> party = std::nullopt;
-        Assets assets;
-        std::vector<Button> buttons;
+        std::shared_ptr<Timestamps> timestamps = std::make_shared<Timestamps>();
+        std::shared_ptr<Party> party = nullptr;
+        std::shared_ptr<Assets> assets = std::make_shared<Assets>();
+        std::vector<std::shared_ptr<Button>> buttons;
     };
 
     #pragma endregion
@@ -497,7 +623,14 @@ namespace DiscordRichPresence {
 
             // Open pipe if needed
             if (result = pipe->Open(); result != Result::Ok) return result;
-            if (result = pipe->Write(0, std::format("{{\"v\":1,\"client_id\":\"{}\"}}", client_id)); result != Result::Ok) return result;
+
+            JSON::JsonWriter writer;
+            writer.BeginObject();
+            writer.Put("v", 1);
+            writer.Put("client_id", std::to_string(client_id));
+            writer.EndObject();
+
+            if (result = pipe->Write(0, writer.ToString()); result != Result::Ok) return result;
             
             // Wait for dispatch event
             IpcMessage message;
@@ -514,7 +647,7 @@ namespace DiscordRichPresence {
             return Connect();
         }
 
-        Result UpdateActivity(const Activity& activity) {
+        Result UpdateActivity(const std::shared_ptr<Activity> activity) {
             #if _WIN32
             int pid = GetCurrentProcessId();
             #else // unix
@@ -522,15 +655,21 @@ namespace DiscordRichPresence {
             int pid = getpid();
             #endif
 
-            std::string msg = std::format(
-                "{{\"cmd\":\"SET_ACTIVITY\",\"args\":{{\"pid\":{},\"activity\":{}}},\"nonce\":\"{}\"}}",
-                pid,
-                activity.ToJson(),
-                UUID::GenerateUUIDv4()
-            );
+            JSON::JsonWriter writer;
+            writer.BeginObject();
+            writer.Put("cmd", "SET_ACTIVITY");
+
+            writer.PendMember("args");
+            writer.BeginObject();
+            writer.Put("pid", static_cast<long long>(pid));
+            writer.Put("activity", activity);
+            writer.EndObject();
+
+            writer.Put("nonce", UUID::GenerateUUIDv4());
+            writer.EndObject();
 
             Result result;
-            if (result = pipe->Write(1, msg); result != Result::Ok) return result;
+            if (result = pipe->Write(1, writer.ToString()); result != Result::Ok) return result;
 
             // Wait for response
             IpcMessage message;
@@ -553,6 +692,24 @@ namespace DiscordRichPresence {
                 pid,
                 UUID::GenerateUUIDv4()
             );
+
+            JSON::JsonWriter writer;
+            writer.BeginObject();
+            writer.Put("cmd", "SET_ACTIVITY");
+            writer.PendMember("args");
+            writer.BeginObject();
+            writer.Put("pid", pid);
+            writer.PendMember("activity");
+
+            // Make an empty object
+            writer.BeginObject();
+            writer.EndObject();
+
+            // End args object
+            writer.EndObject();
+
+            writer.Put("nonce", UUID::GenerateUUIDv4());
+            writer.EndObject();
 
             Result result;
             if (result = pipe->Write(1, msg); result != Result::Ok) return result;
