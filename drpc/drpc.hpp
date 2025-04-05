@@ -28,7 +28,6 @@ DEALINGS IN THE SOFTWARE.
 #include <cassert>
 #include <cstdint>
 #include <cstring>
-#include <format>
 #include <map>
 #include <memory>
 #include <random>
@@ -393,7 +392,7 @@ namespace DiscordRichPresence {
                 writer->Put("id", id);
 
             if (current_size != 0 || max_size != 0)
-                writer->Put("size", std::vector {JSON::JsonValue(current_size), JSON::JsonValue(max_size)});
+                writer->Put("size", std::vector<JSON::JsonValue> {current_size, max_size});
 
             writer->EndObject();
         }
@@ -687,12 +686,6 @@ namespace DiscordRichPresence {
             int pid = getpid();
             #endif
 
-            std::string msg = std::format(
-                "{{\"cmd\":\"SET_ACTIVITY\",\"args\":{{\"pid\":{},\"activity\":{{}}}},\"nonce\":\"{}\"}}",
-                pid,
-                UUID::GenerateUUIDv4()
-            );
-
             JSON::JsonWriter writer;
             writer.BeginObject();
             writer.Put("cmd", "SET_ACTIVITY");
@@ -712,7 +705,7 @@ namespace DiscordRichPresence {
             writer.EndObject();
 
             Result result;
-            if (result = pipe->Write(1, msg); result != Result::Ok) return result;
+            if (result = pipe->Write(1, writer.ToString()); result != Result::Ok) return result;
 
             // Wait for response
             IpcMessage message;
