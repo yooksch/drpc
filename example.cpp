@@ -1,13 +1,25 @@
 #include "drpc/drpc.hpp"
 
 #include <cstdint>
-#include <iostream>
+#include <print>
 #include <memory>
 
 constexpr uint64_t APPLICATION_ID = 1355907951155740785;
 
 int main() {
     DiscordRichPresence::Client client(APPLICATION_ID);
+
+    client.SetEventCallback([](auto event) {
+        if (event == DiscordRichPresence::Event::Connected)
+            std::println("Connected");
+        else if (event == DiscordRichPresence::Event::Disconnected)
+            std::println("Disconnected");
+    });
+
+    client.SetLogCallback([](auto result, auto level, auto message, auto ipc_message) {
+        std::println("[{}] [{}] {}", DiscordRichPresence::LogLevelToString(level), DiscordRichPresence::ResultToString(result), message);
+    });
+
     client.Connect();
 
     auto activity = std::make_shared<DiscordRichPresence::Activity>();
@@ -33,14 +45,12 @@ int main() {
     activity->AddButton(std::make_shared<DiscordRichPresence::Button>("Test", "https://yooksch.com"));
     activity->AddButton(std::make_shared<DiscordRichPresence::Button>("Test 2", "https://youtu.be/dQw4w9WgXcQ"));
 
-    auto result = client.UpdateActivity(activity);
-    if (result == DiscordRichPresence::Result::Ok) {
-        std::cout << "Successfully set activity!" << std::endl;
-    } else {
-        std::cout << "Failed to set activity (" << (int)result << ")" << std::endl;
-    }
+    client.UpdateActivity(activity, [](DiscordRichPresence::Result result, auto) {
+        std::println("Updated activity: {}", DiscordRichPresence::ResultToDescription(result));
+    });
 
-    std::cin.get(); // Keep process alive
+    auto result = client.Run(); 
+    std::println("Client exited: {} - {}", DiscordRichPresence::ResultToString(result), DiscordRichPresence::ResultToDescription(result));
 
     return 0;
 }

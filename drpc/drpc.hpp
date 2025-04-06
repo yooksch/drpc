@@ -26,12 +26,18 @@ DEALINGS IN THE SOFTWARE.
 
 #include <bit>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <format>
+#include <functional>
 #include <map>
 #include <memory>
+#include <queue>
 #include <random>
+#include <regex>
 #include <sstream>
+#include <thread>
 #include <variant>
 #include <vector>
 #include <string>
@@ -222,16 +228,84 @@ namespace DiscordRichPresence {
 
     enum class Result {
         Ok = 0,
+        PipeNotOpen,
         OpenPipeFailed,
         ReadPipeFailed,
         WritePipeFailed,
         HandshakeFailed,
-        SetActivityFailed
+        SetActivityFailed,
+        UnknownError
     };
+
+    enum class LogLevel {
+        Info,
+        Warn,
+        Error,
+        Trace
+    };
+
+    enum class Event {
+        Connected,
+        Disconnected
+    };
+
+    inline const char* ResultToString(Result result) {
+        switch (result) {
+        case DiscordRichPresence::Result::Ok:
+            return "Ok";
+        case DiscordRichPresence::Result::PipeNotOpen:
+            return "PipeNotOpen";
+        case DiscordRichPresence::Result::OpenPipeFailed:
+            return "OpenPipeFailed";
+        case DiscordRichPresence::Result::ReadPipeFailed:
+            return "ReadPipeFailed";
+        case DiscordRichPresence::Result::WritePipeFailed:
+            return "WritePipeFailed";
+        case DiscordRichPresence::Result::HandshakeFailed:
+            return "HandshakeFailed";
+        case DiscordRichPresence::Result::SetActivityFailed:
+            return "SetActivity";
+        case DiscordRichPresence::Result::UnknownError:
+            return "UnknownError";
+        }
+    }
+
+    inline const char* ResultToDescription(Result result) {
+        switch (result) {
+        case DiscordRichPresence::Result::Ok:
+            return "Ok";
+        case DiscordRichPresence::Result::PipeNotOpen:
+            return "Named pipe is not open";
+        case DiscordRichPresence::Result::OpenPipeFailed:
+            return "Failed to open named pipe";
+        case DiscordRichPresence::Result::ReadPipeFailed:
+            return "Failed to read from named pipe";
+        case DiscordRichPresence::Result::WritePipeFailed:
+            return "Failed to write to named pipe";
+        case DiscordRichPresence::Result::HandshakeFailed:
+            return "Failed to handshake with Discord client";
+        case DiscordRichPresence::Result::SetActivityFailed:
+            return "Failed to set Discord activity";
+        case DiscordRichPresence::Result::UnknownError:
+            return "An unknown occured";
+        }
+    }
 
     struct IpcMessage {
         uint32_t op_code;
         std::string message;
+        std::string nonce;
+    };
+
+    template<>
+    struct std::formatter<IpcMessage> {
+        constexpr auto parse(std::format_parse_context& ctx) {
+            return ctx.begin();
+        }
+
+        auto format(const IpcMessage& message, std::format_context& ctx) const {
+            return std::format_to(ctx.out(), "Nonce:{} Op:{} Msg:{}", message.nonce.length() > 0 ? message.nonce : "NONE", message.op_code, message.message);
+        }
     };
 
     class Pipe {
@@ -240,6 +314,7 @@ namespace DiscordRichPresence {
         virtual Result Close() = 0;
         virtual Result Read(IpcMessage* message) = 0;
         virtual Result Write(uint32_t op_code, std::string message) = 0;
+        virtual bool IsOpen() = 0;
     };
 
     #ifdef _WIN32
@@ -293,6 +368,8 @@ namespace DiscordRichPresence {
         }
 
         Result Read(IpcMessage* message) override {
+            static std::regex nonce_re(R"(\"nonce\":\"([a-z-A-Z0-9\-]+)\")");
+
             std::array<std::byte, 4> op_code_bytes, msg_len_bytes;
 
             Result result;
@@ -308,6 +385,11 @@ namespace DiscordRichPresence {
                 return Result::ReadPipeFailed;
             }
             message->message = std::string(buffer.begin(), buffer.end());
+            
+            // Get nonce
+            std::smatch match;
+            if (std::regex_search(message->message, match, nonce_re))
+                message->nonce = match.str(1);
 
             return Result::Ok;
         }
@@ -327,6 +409,10 @@ namespace DiscordRichPresence {
                 static_cast<DWORD>(buffer.size()),
                 &bytes_written, 0
             ) && bytes_written == buffer.size() ? Result::Ok : Result::WritePipeFailed;
+        }
+
+        bool IsOpen() override {
+            return pipe_handle && GetNamedPipeHandleState(pipe_handle, NULL, NULL, NULL, NULL, NULL, 0);
         }
     private:
         HANDLE pipe_handle;
@@ -607,6 +693,11 @@ namespace DiscordRichPresence {
 
     #pragma endregion
 
+    struct ClientSettings {
+        bool auto_reconnect = true;
+        uint64_t reconnect_timeout_ms = 5000;
+    };
+
     class Client {
     public:
         Client(uint64_t client_id) : client_id(client_id) {
@@ -633,8 +724,23 @@ namespace DiscordRichPresence {
             
             // Wait for dispatch event
             IpcMessage message;
+
+            // Dispatch events do not provide a nonce; therefore, we ignore the error
             if (result = pipe->Read(&message); result != Result::Ok) return result;
-            return message.op_code == 1 ? Result::Ok : Result::HandshakeFailed;
+            bool success = message.op_code == 1;
+
+            if (success) {
+                event_callback(Event::Connected);
+            }
+
+            log_callback(
+                Result::Ok,
+                LogLevel::Trace,
+                std::format("{}", message),
+                message
+            );
+
+            return success ? Result::Ok : Result::HandshakeFailed;
         }
 
         Result Disconnect() {
@@ -646,13 +752,15 @@ namespace DiscordRichPresence {
             return Connect();
         }
 
-        Result UpdateActivity(const std::shared_ptr<Activity> activity) {
+        void UpdateActivity(const std::shared_ptr<Activity> activity, std::function<void(Result result, IpcMessage ipc_message)> callback) {
             #if _WIN32
             int pid = GetCurrentProcessId();
             #else // unix
             #include <unistd.h>
             int pid = getpid();
             #endif
+
+            auto nonce = UUID::GenerateUUIDv4();
 
             JSON::JsonWriter writer;
             writer.BeginObject();
@@ -664,21 +772,20 @@ namespace DiscordRichPresence {
             writer.Put("activity", activity);
             writer.EndObject();
 
-            writer.Put("nonce", UUID::GenerateUUIDv4());
+            writer.Put("nonce", nonce);
             writer.EndObject();
 
-            Result result;
-            if (result = pipe->Write(1, writer.ToString()); result != Result::Ok) return result;
+            outgoing_messages.emplace(IpcMessage {
+                .op_code = 1,
+                .message = writer.ToString(),
+                .nonce = nonce
+            });
 
-            // Wait for response
-            IpcMessage message;
-            if (result = pipe->Read(&message); result != Result::Ok) return result;
-            return message.op_code == 1
-                && message.message.find("\"evt\":\"ERROR\"") == std::string::npos
-                ? Result::Ok : Result::SetActivityFailed;
+            callbacks[nonce] = callback;
+            last_activity = activity;
         }
 
-        Result ClearActivity() {
+        void ClearActivity(std::function<void(Result result, IpcMessage ipc_message)> callback) {
             #if _WIN32
             int pid = GetCurrentProcessId();
             #else // unix
@@ -686,6 +793,7 @@ namespace DiscordRichPresence {
             int pid = getpid();
             #endif
 
+            auto nonce = UUID::GenerateUUIDv4();
             JSON::JsonWriter writer;
             writer.BeginObject();
             writer.Put("cmd", "SET_ACTIVITY");
@@ -701,24 +809,130 @@ namespace DiscordRichPresence {
             // End args object
             writer.EndObject();
 
-            writer.Put("nonce", UUID::GenerateUUIDv4());
+            writer.Put("nonce", nonce);
             writer.EndObject();
 
-            Result result;
-            if (result = pipe->Write(1, writer.ToString()); result != Result::Ok) return result;
+            outgoing_messages.emplace(IpcMessage {
+                .op_code = 1,
+                .message = writer.ToString(),
+                .nonce = nonce
+            });
 
-            // Wait for response
-            IpcMessage message;
-            if (result = pipe->Read(&message); result != Result::Ok) return result;
-            return message.op_code == 1
-                && message.message.find("\"evt\":\"ERROR\"") == std::string::npos
-                ? Result::Ok : Result::SetActivityFailed;
+            callbacks[nonce] = callback;
+            last_activity = nullptr;
+        }
+
+        Result Run() {
+            Result result;
+
+            while (true) {
+                if (!pipe->IsOpen()) {
+                    if (settings.auto_reconnect) {
+                        log_callback(Result::PipeNotOpen, LogLevel::Error, "Pipe handle is invalid. Attempting to reconnect", std::nullopt);
+
+                        if (result = Connect(); result == Result::Ok) {
+                            log_callback(Result::Ok, LogLevel::Info, "Reconnected", std::nullopt);
+
+                            if (last_activity != nullptr) {
+                                UpdateActivity(last_activity, [this](auto result, auto message) {
+                                    if (result == Result::Ok) {
+                                        log_callback(result, LogLevel::Info, "Re-used last activity", message);
+                                    } else {
+                                        log_callback(result, LogLevel::Error, "Failed to use last activity", message);
+                                    }
+                                });
+                            }
+                        } else {
+                            log_callback(result, LogLevel::Error, "Failed to reconnect", std::nullopt);
+                        }
+
+                        std::this_thread::sleep_for(std::chrono::milliseconds(settings.reconnect_timeout_ms));
+                        continue;
+                    }
+
+                    // Wait 100ms before retrying
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+
+                // Send queued messages
+                while (outgoing_messages.size() > 0) {
+                    auto msg = outgoing_messages.front();
+                    outgoing_messages.pop();
+                    if (result = pipe->Write(msg.op_code, msg.message); result != Result::Ok) {
+                        log_callback(result, LogLevel::Error, ResultToDescription(result), msg);
+                        
+                        if (callbacks.contains(msg.nonce)) {
+                            callbacks[msg.nonce](result, msg);
+                            callbacks.erase(msg.nonce);
+                        }
+
+                        continue;
+                    }
+                }
+
+                IpcMessage msg;
+                if (result = pipe->Read(&msg); result != Result::Ok) {
+                    log_callback(result, LogLevel::Error, ResultToDescription(result), msg);
+                    if (result == Result::ReadPipeFailed) {
+                        pipe->Close(); // Close pipe handle
+                        event_callback(Event::Disconnected);
+                    }
+                } else {
+                    auto success = msg.message.find("\"evt\":\"ERROR\"") == std::string::npos && msg.op_code != 2;
+                    log_callback(
+                        success ? Result::Ok : Result::UnknownError,
+                        LogLevel::Trace,
+                        std::format("{}", msg),
+                        msg
+                    );
+                }
+
+                if (callbacks.contains(msg.nonce)) {
+                    callbacks[msg.nonce](result, msg);
+                    callbacks.erase(msg.nonce);
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+
+            return Result::Ok;
+        }
+
+        void SetLogCallback(std::function<void(Result result, LogLevel level, std::string message, std::optional<IpcMessage> ipc_message)> callback) {
+            log_callback = callback;
+        }
+
+        void SetEventCallback(std::function<void(Event event)> callback) {
+            event_callback = callback;
+        }
+
+        ClientSettings& GetSettings() {
+            return settings;
         }
     private:
+        ClientSettings settings;
         std::shared_ptr<Pipe> pipe;
         uint64_t client_id;
-
+        std::queue<IpcMessage> outgoing_messages;
+        std::map<std::string, std::function<void(Result result, IpcMessage ipc_message)>> callbacks;
+        std::function<void(Result result, LogLevel level, std::string message, std::optional<IpcMessage> ipc_message)> log_callback = [](auto, auto, auto, auto){};
+        std::function<void(Event event)> event_callback = [](auto){};
+        std::shared_ptr<Activity> last_activity;
     };
+
+    inline const char* LogLevelToString(LogLevel level) {
+        switch (level) {
+        case DiscordRichPresence::LogLevel::Info:
+            return "INFO";
+        case DiscordRichPresence::LogLevel::Warn:
+            return "WARN";
+        case DiscordRichPresence::LogLevel::Error:
+            return "ERROR";
+        case DiscordRichPresence::LogLevel::Trace:
+            return "TRACE";
+        }
+    }
 }
 
 #endif
