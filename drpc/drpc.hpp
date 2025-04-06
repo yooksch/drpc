@@ -520,10 +520,19 @@ namespace DiscordRichPresence {
 
         void ToJson(JSON::JsonWriter* writer) const override {
             writer->BeginObject();
-            writer->Put("large_image", large_image);
-            writer->Put("large_text", large_text);
-            writer->Put("small_image", small_image);
-            writer->Put("small_text", small_text);
+
+            if (large_image.length() > 0)
+                writer->Put("large_image", large_image);
+
+            if (large_text.length() > 0)
+                writer->Put("large_text", large_text);
+
+            if (small_image.length() > 0)
+                writer->Put("small_image", small_image);
+
+            if (small_text.length() > 0)
+                writer->Put("small_text", small_text);
+            
             writer->EndObject();
         }
     private:
