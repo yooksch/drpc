@@ -719,7 +719,8 @@ namespace DiscordRichPresence {
             for (const auto& btn : buttons)
                 j_buttons.emplace_back(btn);
 
-            writer->Put("buttons", j_buttons);
+            if (j_buttons.size() > 0)
+                writer->Put("buttons", j_buttons);
 
             writer->EndObject();
         }
