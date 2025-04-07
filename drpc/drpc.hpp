@@ -917,7 +917,7 @@ namespace DiscordRichPresence {
                 IpcMessage msg;
                 if (result = pipe->Read(&msg, true); result != Result::Ok) {
                     // Timeouts are expected and necessary for the loop to continue
-                    if (result == Result::ReadPipeNoData) continue;
+                    if (result == Result::ReadPipeNoData && pipe->IsOpen()) continue;
 
                     log_callback(result, LogLevel::Error, ResultToDescription(result), msg);
                     if (result == Result::ReadPipeFailed) {
