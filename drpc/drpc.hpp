@@ -33,6 +33,7 @@ DEALINGS IN THE SOFTWARE.
 #include <functional>
 #include <map>
 #include <memory>
+#include <print>
 #include <queue>
 #include <random>
 #include <regex>
@@ -234,7 +235,8 @@ namespace DiscordRichPresence {
         WritePipeFailed,
         HandshakeFailed,
         SetActivityFailed,
-        UnknownError
+        UnknownError,
+        ReadPipeNoData
     };
 
     enum class LogLevel {
@@ -267,6 +269,8 @@ namespace DiscordRichPresence {
             return "SetActivity";
         case DiscordRichPresence::Result::UnknownError:
             return "UnknownError";
+        case DiscordRichPresence::Result::ReadPipeNoData:
+            return "ReadPipeNoData";
         }
     }
 
@@ -288,6 +292,8 @@ namespace DiscordRichPresence {
             return "Failed to set Discord activity";
         case DiscordRichPresence::Result::UnknownError:
             return "An unknown occured";
+        case DiscordRichPresence::Result::ReadPipeNoData:
+            return "Reading from named pipe returned no data";
         }
     }
 
@@ -312,7 +318,8 @@ namespace DiscordRichPresence {
     public:
         virtual Result Open() = 0;
         virtual Result Close() = 0;
-        virtual Result Read(IpcMessage* message) = 0;
+        virtual Result Read(IpcMessage* message, bool peek = false) = 0;
+        virtual void CancelIo() = 0;
         virtual Result Write(uint32_t op_code, std::string message) = 0;
         virtual bool IsOpen() = 0;
     };
@@ -331,10 +338,10 @@ namespace DiscordRichPresence {
             HANDLE pipe = CreateFileA(
                 "\\\\.\\pipe\\discord-ipc-0",
                 GENERIC_READ | GENERIC_WRITE,
-                0,
+                NULL,
                 NULL,
                 OPEN_EXISTING,
-                0,
+                NULL,
                 NULL
             );
 
@@ -342,8 +349,10 @@ namespace DiscordRichPresence {
                 pipe_handle = pipe;
 
                 DWORD mode = PIPE_READMODE_BYTE;
-                if (!SetNamedPipeHandleState(pipe, &mode, NULL, NULL))
+                if (!SetNamedPipeHandleState(pipe, &mode, NULL, NULL)) {
+                    Close();
                     return Result::OpenPipeFailed;
+                }
             } else {
                 return Result::OpenPipeFailed;
             }
@@ -358,31 +367,53 @@ namespace DiscordRichPresence {
         }
 
         template<size_t N>
-        Result ReadBytes(std::array<std::byte, N>* buffer) {
+        Result ReadBytes(std::array<std::byte, N>* buffer, bool peek = false) {
             DWORD bytes_read;
-            if (!ReadFile(pipe_handle, buffer->data(), buffer->size(), &bytes_read, 0)
-                || bytes_read != buffer->size()) {
-                return Result::ReadPipeFailed;
+            if (peek) {
+                DWORD bytes_available;
+                if (PeekNamedPipe(pipe_handle, NULL, NULL, NULL, &bytes_available, NULL) && bytes_available > 0)
+                    goto read;
+
+                return Result::ReadPipeNoData;
+            } else {
+                read:
+                if (!ReadFile(pipe_handle, buffer->data(), buffer->size(), &bytes_read, 0)
+                    || bytes_read != buffer->size()) {
+                    return Result::ReadPipeFailed;
+                }
             }
             return Result::Ok;
         }
 
-        Result Read(IpcMessage* message) override {
+        Result Read(IpcMessage* message, bool peek) override {
             static std::regex nonce_re(R"(\"nonce\":\"([a-z-A-Z0-9\-]+)\")");
 
             std::array<std::byte, 4> op_code_bytes, msg_len_bytes;
 
             Result result;
-            if (result = ReadBytes(&op_code_bytes); result != Result::Ok) return result;
-            if (result = ReadBytes(&msg_len_bytes); result != Result::Ok) return result;
+            if (result = ReadBytes(&op_code_bytes, peek); result != Result::Ok) return result;
+            if (result = ReadBytes(&msg_len_bytes, peek); result != Result::Ok) return result;
 
             message->op_code = std::bit_cast<uint32_t>(op_code_bytes);
             uint32_t msg_len = std::bit_cast<uint32_t>(msg_len_bytes);
             
             std::vector<char> buffer(msg_len);
             DWORD bytes_read;
-            if (!ReadFile(pipe_handle, buffer.data(), msg_len, &bytes_read, 0) || bytes_read != msg_len) {
-                return Result::ReadPipeFailed;
+
+            if (peek) {
+                DWORD bytes_available;
+                std::println("a");
+                if (PeekNamedPipe(pipe_handle, NULL, NULL, NULL, &bytes_available, NULL) && bytes_available > 0) {
+                    // Has data
+                    goto read;
+                } else {
+                    return Result::ReadPipeNoData;
+                }
+            } else {
+                read:
+                if (!ReadFile(pipe_handle, buffer.data(), msg_len, &bytes_read, 0) || bytes_read != msg_len) {
+                    return Result::ReadPipeFailed;
+                }
             }
             message->message = std::string(buffer.begin(), buffer.end());
             
@@ -392,6 +423,10 @@ namespace DiscordRichPresence {
                 message->nonce = match.str(1);
 
             return Result::Ok;
+        }
+
+        void CancelIo() override {
+            ::CancelIo(pipe_handle);
         }
 
         Result Write(uint32_t op_code, std::string message) override {
@@ -881,7 +916,10 @@ namespace DiscordRichPresence {
                 }
 
                 IpcMessage msg;
-                if (result = pipe->Read(&msg); result != Result::Ok) {
+                if (result = pipe->Read(&msg, true); result != Result::Ok) {
+                    // Timeouts are expected and necessary for the loop to continue
+                    if (result == Result::ReadPipeNoData) continue;
+
                     log_callback(result, LogLevel::Error, ResultToDescription(result), msg);
                     if (result == Result::ReadPipeFailed) {
                         pipe->Close(); // Close pipe handle
@@ -902,7 +940,7 @@ namespace DiscordRichPresence {
                     callbacks.erase(msg.nonce);
                 }
 
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
             return Result::Ok;

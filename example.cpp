@@ -1,5 +1,6 @@
 #include "drpc/drpc.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <print>
 #include <memory>
@@ -20,7 +21,8 @@ int main() {
         std::println("[{}] [{}] {}", DiscordRichPresence::LogLevelToString(level), DiscordRichPresence::ResultToString(result), message);
     });
 
-    client.Connect();
+    auto result = client.Connect();
+    std::println("Connect returned: {}", DiscordRichPresence::ResultToString(result));
 
     auto activity = std::make_shared<DiscordRichPresence::Activity>();
     activity->SetClientId(APPLICATION_ID);
@@ -49,7 +51,12 @@ int main() {
         std::println("Updated activity: {}", DiscordRichPresence::ResultToDescription(result));
     });
 
-    auto result = client.Run(); 
+    std::thread([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+        client.UpdateActivity(activity, [](auto, auto) {});
+    }).detach();
+
+    result = client.Run(); 
     std::println("Client exited: {} - {}", DiscordRichPresence::ResultToString(result), DiscordRichPresence::ResultToDescription(result));
 
     return 0;
