@@ -33,7 +33,6 @@ DEALINGS IN THE SOFTWARE.
 #include <functional>
 #include <map>
 #include <memory>
-#include <print>
 #include <queue>
 #include <random>
 #include <regex>
@@ -402,7 +401,6 @@ namespace DiscordRichPresence {
 
             if (peek) {
                 DWORD bytes_available;
-                std::println("a");
                 if (PeekNamedPipe(pipe_handle, NULL, NULL, NULL, &bytes_available, NULL) && bytes_available > 0) {
                     // Has data
                     goto read;
