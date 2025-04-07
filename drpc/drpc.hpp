@@ -370,10 +370,13 @@ namespace DiscordRichPresence {
             DWORD bytes_read;
             if (peek) {
                 DWORD bytes_available;
-                if (PeekNamedPipe(pipe_handle, NULL, NULL, NULL, &bytes_available, NULL) && bytes_available > 0)
-                    goto read;
-
-                return Result::ReadPipeNoData;
+                if (PeekNamedPipe(pipe_handle, NULL, NULL, NULL, &bytes_available, NULL)) {
+                    if (bytes_available > 0)
+                        goto read;
+                    else
+                        return Result::ReadPipeNoData;
+                }
+                return Result::ReadPipeFailed;
             } else {
                 read:
                 if (!ReadFile(pipe_handle, buffer->data(), buffer->size(), &bytes_read, 0)
@@ -401,11 +404,13 @@ namespace DiscordRichPresence {
 
             if (peek) {
                 DWORD bytes_available;
-                if (PeekNamedPipe(pipe_handle, NULL, NULL, NULL, &bytes_available, NULL) && bytes_available > 0) {
-                    // Has data
-                    goto read;
+                if (PeekNamedPipe(pipe_handle, NULL, NULL, NULL, &bytes_available, NULL)) {
+                    if (bytes_available > 0)
+                        goto read;
+                    else
+                        return Result::ReadPipeNoData;
                 } else {
-                    return Result::ReadPipeNoData;
+                    return Result::ReadPipeFailed;
                 }
             } else {
                 read:
