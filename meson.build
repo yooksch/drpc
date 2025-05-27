@@ -4,5 +4,4 @@ project('drpc', 'cpp',
 
 executable('example',
            'example.cpp',
-           include_directories: include_directories('.'),
-           cpp_args: ['-Wno-microsoft-template'])
+           include_directories: include_directories('.'))

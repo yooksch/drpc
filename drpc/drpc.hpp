@@ -45,6 +45,11 @@ DEALINGS IN THE SOFTWARE.
 
 #ifdef _WIN32
 #include <Windows.h>
+#else
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/un.h>
+#include <sys/ioctl.h>
 #endif
 
 namespace DiscordRichPresence {
@@ -302,17 +307,6 @@ namespace DiscordRichPresence {
         std::string nonce;
     };
 
-    template<>
-    struct std::formatter<IpcMessage> {
-        constexpr auto parse(std::format_parse_context& ctx) {
-            return ctx.begin();
-        }
-
-        auto format(const IpcMessage& message, std::format_context& ctx) const {
-            return std::format_to(ctx.out(), "Nonce:{} Op:{} Msg:{}", message.nonce.length() > 0 ? message.nonce : "NONE", message.op_code, message.message);
-        }
-    };
-
     class Pipe {
     public:
         virtual Result Open() = 0;
@@ -454,6 +448,92 @@ namespace DiscordRichPresence {
         }
     private:
         HANDLE pipe_handle;
+    };
+
+    #else
+
+    class UnixPipe : public Pipe {
+      public:
+        Result Open() override {
+          socketfd = socket(AF_UNIX, SOCK_STREAM, 0);
+          if (socketfd < 0)
+            return Result::OpenPipeFailed;
+
+          struct sockaddr_un addr;
+          memset(&addr, 0, sizeof(addr));
+          addr.sun_family = AF_UNIX;
+          strcpy(addr.sun_path, "/var/run/user/1000/discord-ipc-0");
+
+          if (connect(socketfd, (struct sockaddr*)&addr, sizeof(addr)) == -1)
+            return Result::OpenPipeFailed;
+
+          return Result::Ok;
+        }
+
+        Result Close() override {
+          return Result::Ok;
+        }
+
+        void CancelIo() override {
+          // not needed on unix
+        }
+
+        template<size_t N>
+        Result ReadBytes(std::array<std::byte, N>* buffer, bool peek = false) {
+          int bytes_available;
+          ioctl(socketfd, FIONREAD, &bytes_available);
+
+          if (bytes_available == 0) {
+            if (peek) return Result::ReadPipeNoData;
+            else return Result::ReadPipeFailed;
+          }
+
+          return read(socketfd, buffer->data(), N) == N ? Result::Ok : Result::ReadPipeFailed;
+        }
+
+        Result Read(IpcMessage* msg, bool peek) override {
+          std::array<std::byte, 4> op_code_bytes, msg_len_bytes;
+
+          Result result;
+          if (result = ReadBytes(&op_code_bytes, peek); result != Result::Ok) return result;
+          if (result = ReadBytes(&msg_len_bytes, peek); result != Result::Ok) return result;
+
+          msg->op_code = std::bit_cast<uint32_t>(op_code_bytes);
+          uint32_t msg_len = std::bit_cast<uint32_t>(msg_len_bytes);
+
+          if (peek) {
+            int msg_size;
+            ioctl(socketfd, FIONREAD, &msg_size);
+
+            if (msg_size == 0)
+              return Result::ReadPipeNoData;
+          }
+
+          std::vector<char> buffer(msg_len);
+          int bytes_read = read(socketfd, buffer.data(), msg_len);
+          if (bytes_read != (int)msg_len) return Result::ReadPipeFailed;
+
+          msg->message = std::string(buffer.begin(), buffer.end());
+
+          return Result::Ok;
+        }
+
+        Result Write(uint32_t op_code, std::string message) override {
+          uint32_t length = static_cast<uint32_t>(message.length());
+
+          std::vector<char> buffer(8 + length);
+          std::memcpy(buffer.data(), &op_code, 4);
+          std::memcpy(buffer.data() + 4, &length, 4);
+          std::memcpy(buffer.data() + 8, message.data(), length);
+
+          return write(socketfd, buffer.data(), buffer.size()) < 0 ? Result::WritePipeFailed : Result::Ok;
+        }
+
+        bool IsOpen() override {
+          return socketfd != 0;
+        }
+      private:
+        int socketfd;
     };
 
     #endif
@@ -752,7 +832,7 @@ namespace DiscordRichPresence {
             #if _WIN32
             pipe = std::make_shared<WindowsPipe>();
             #else
-            #pragma GCC error "Non-Windows operating systems are not yet supported"
+            pipe = std::make_shared<UnixPipe>();
             #endif
         }
 
@@ -784,7 +864,7 @@ namespace DiscordRichPresence {
             log_callback(
                 Result::Ok,
                 LogLevel::Trace,
-                std::format("{}", message),
+                std::format("Op:{} Msg:{}", message.op_code, message.message),
                 message
             );
 
@@ -804,7 +884,6 @@ namespace DiscordRichPresence {
             #if _WIN32
             int pid = GetCurrentProcessId();
             #else // unix
-            #include <unistd.h>
             int pid = getpid();
             #endif
 
@@ -816,7 +895,7 @@ namespace DiscordRichPresence {
 
             writer.PendMember("args");
             writer.BeginObject();
-            writer.Put("pid", static_cast<long long>(pid));
+            writer.Put("pid", pid);
             writer.Put("activity", activity);
             writer.EndObject();
 
@@ -837,7 +916,6 @@ namespace DiscordRichPresence {
             #if _WIN32
             int pid = GetCurrentProcessId();
             #else // unix
-            #include <unistd.h>
             int pid = getpid();
             #endif
 
@@ -934,7 +1012,7 @@ namespace DiscordRichPresence {
                     log_callback(
                         success ? Result::Ok : Result::UnknownError,
                         LogLevel::Trace,
-                        std::format("{}", msg),
+                        std::format("Op:{} Msg:{}", msg.op_code, msg.message),
                         msg
                     );
                 }
