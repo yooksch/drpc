@@ -382,7 +382,7 @@ namespace DiscordRichPresence {
         }
 
         Result Read(IpcMessage* message, bool peek) override {
-            static std::regex nonce_re(R"(\"nonce\":\"([a-z-A-Z0-9\-]+)\")");
+            static std::regex nonce_re(R"(\"nonce\":\"([a-zA-Z0-9\-]+)\")");
 
             std::array<std::byte, 4> op_code_bytes, msg_len_bytes;
 
@@ -492,6 +492,8 @@ namespace DiscordRichPresence {
         }
 
         Result Read(IpcMessage* msg, bool peek) override {
+          static std::regex nonce_re(R"(\"nonce\":\"([a-zA-Z0-9\-]+)\")");
+
           std::array<std::byte, 4> op_code_bytes, msg_len_bytes;
 
           Result result;
@@ -514,6 +516,10 @@ namespace DiscordRichPresence {
           if (bytes_read != (int)msg_len) return Result::ReadPipeFailed;
 
           msg->message = std::string(buffer.begin(), buffer.end());
+
+          std::smatch match;
+          if (std::regex_search(msg->message, match, nonce_re))
+            msg->nonce = match.str(1);
 
           return Result::Ok;
         }
